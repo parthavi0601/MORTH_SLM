@@ -1,0 +1,2 @@
+# Trained model weights are saved here after running pytorch_train.py
+# These files are too large for GitHub and are excluded via .gitignore
