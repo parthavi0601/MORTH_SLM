@@ -1,7 +1,5 @@
 __pycache__/
 *.pyc
-models/*.pt
-models/*.pkl
 data/pdfs/*.pdf
 data/*.csv
 data/*.xlsx
