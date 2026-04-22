@@ -19,9 +19,30 @@ import pickle
 import os
 import re
 import json
+import shutil
+from datetime import datetime
 from collections import defaultdict, Counter
 from multiprocessing import Pool, cpu_count
 import functools
+
+
+def _backup_existing_models(model_dir, prefix=""):
+    """Backup existing model files before overwriting.
+
+    Creates a timestamped folder inside <model_dir>/backups/ and copies
+    all .pt and .pkl files there so previous training runs are preserved.
+    """
+    model_files = [f for f in os.listdir(model_dir)
+                   if f.endswith(('.pt', '.pkl')) and (not prefix or f.startswith(prefix))]
+    if not model_files:
+        return
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = os.path.join(model_dir, "backups", ts)
+    os.makedirs(backup_dir, exist_ok=True)
+    for f in model_files:
+        src = os.path.join(model_dir, f)
+        shutil.copy2(src, os.path.join(backup_dir, f))
+    print(f"  ⮡ Backed up {len(model_files)} existing model files → {backup_dir}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -693,6 +714,9 @@ def train_ner(training_data, vocab, model_dir="models",
         print(f"  Epoch {epoch:3d}/{epochs} │ Loss: {avg_loss:.4f} │ "
               f"LR: {scheduler.get_last_lr()[0]:.6f} │ "
               f"Samples: {count}")
+
+    # Backup existing models before overwriting
+    _backup_existing_models(model_dir, prefix="ner")
 
     # Save model
     model_path = os.path.join(model_dir, "ner_bilstm_crf.pt")

@@ -17,6 +17,8 @@ import numpy as np
 import pickle
 import os
 import re
+import shutil
+from datetime import datetime
 from collections import Counter
 
 
@@ -310,6 +312,18 @@ def train_qa(corpus_chunks: list, chunk_sources: list, vocab: QAVocabulary,
             vec = model.encode_passage(ids)
             all_passage_vecs.append(vec.cpu().numpy().flatten())
     passage_matrix = np.array(all_passage_vecs)
+
+    # ── Backup existing models before overwriting ──
+    qa_files = [f for f in os.listdir(model_dir)
+                if f.startswith('qa') and f.endswith(('.pt', '.pkl'))]
+    if qa_files:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(model_dir, "backups", ts)
+        os.makedirs(backup_dir, exist_ok=True)
+        for f in qa_files:
+            src = os.path.join(model_dir, f)
+            shutil.copy2(src, os.path.join(backup_dir, f))
+        print(f"  ⮡ Backed up {len(qa_files)} existing QA files → {backup_dir}")
 
     # ── Save everything ──
     model_path = os.path.join(model_dir, "qa_neural.pt")
@@ -703,11 +717,338 @@ class QAPredictor:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 7. FORM GENERATOR (same as before — no neural component)
+# 7. REGEX-BASED TEXT EXTRACTION (FALLBACK — NO MODEL NEEDED)
+# ═══════════════════════════════════════════════════════════════
+
+def extract_from_text_regex(text: str) -> dict:
+    """
+    Extract accident report fields from natural language text using
+    regex and keyword matching. Works without any trained model.
+    Returns a dict with all FAR/DAR fields populated where possible.
+    """
+    data = {}
+    text_lower = text.lower()
+
+    # FIR Number
+    m = re.search(r'(?:FIR|F\.?I\.?R\.?)\s*(?:No\.?|number|num)?\s*[:\-]?\s*([A-Za-z0-9/\-]+/\d{4})', text, re.I)
+    if m:
+        data['fir_no'] = m.group(1).strip()
+    else:
+        m = re.search(r'(?:FIR|F\.?I\.?R\.?)\s*(?:No\.?|number|num)?\s*[:\-]?\s*([A-Za-z0-9/\-]+)', text, re.I)
+        if m:
+            data['fir_no'] = m.group(1).strip()
+
+    # Date of accident
+    date_pattern = r'(?:occurred|happened|took place|accident)\s+(?:on\s+)?(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,]?\s*)?(?:on\s+)?(\d{1,2}[\s/\-](?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s/\-]\d{2,4})'
+    m = re.search(date_pattern, text, re.I)
+    if m:
+        data['date_of_accident'] = m.group(1).strip()
+    else:
+        m = re.search(r'(?:on|dated?)\s+(\d{1,2}[\s/\-](?:January|February|March|April|May|June|July|August|September|October|November|December)[,\s]+\d{4})', text, re.I)
+        if m:
+            data['date_of_accident'] = m.group(1).strip()
+
+    # Date of registration/report
+    m = re.search(r'(?:registered|filed|reported)\s+(?:on\s+)?(\d{1,2}[\s/\-](?:January|February|March|April|May|June|July|August|September|October|November|December)[,\s]+\d{4})', text, re.I)
+    if m:
+        data['report_date'] = m.group(1).strip()
+
+    # Time of accident
+    m = re.search(r'(?:at|around|approximately)\s+(\d{1,2}[:\.]\d{2}\s*(?:AM|PM|am|pm|a\.m\.|p\.m\.)?)', text, re.I)
+    if m:
+        data['time_of_accident'] = m.group(1).strip()
+
+    # Time of reporting
+    m = re.search(r'(?:reported|informed|intimated)\s+(?:at|around)\s+(\d{1,2}[:\.]\d{2}\s*(?:AM|PM|am|pm)?)', text, re.I)
+    if m:
+        data['time_of_reporting'] = m.group(1).strip()
+
+    # Police Station
+    m = re.search(r'(?:at|from)\s+([A-Z][a-zA-Z\s]+?)\s*(?:Police Station|PS|Thana)', text)
+    if m:
+        data['police_station'] = m.group(1).strip() + ' Police Station'
+
+    # District / City
+    m = re.search(r'(?:in|of|at)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*(?:district|city)?\s*[,]?\s*(?:in\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', text)
+    # More targeted: look for "in <City>, <State>" or "<Place>, <District>"
+    m2 = re.search(r'in\s+([A-Z][a-zA-Z\s]+?),\s*([A-Z][a-zA-Z\s]+?)(?:\.|,|$)', text)
+    if m2:
+        data.setdefault('district', m2.group(1).strip())
+
+    # State
+    states = ['Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh',
+              'Goa','Gujarat','Haryana','Himachal Pradesh','Jharkhand','Karnataka',
+              'Kerala','Madhya Pradesh','Maharashtra','Manipur','Meghalaya','Mizoram',
+              'Nagaland','Odisha','Punjab','Rajasthan','Sikkim','Tamil Nadu',
+              'Telangana','Tripura','Uttar Pradesh','Uttarakhand','West Bengal',
+              'Delhi','Jammu and Kashmir']
+    for st in states:
+        if st.lower() in text_lower:
+            data['state'] = st
+            break
+
+    # Place of accident (road/location)
+    m = re.search(r'(?:on|near|at)\s+((?:State Highway|National Highway|NH|SH)\s*\d+[A-Za-z]?\s+(?:near\s+)?[A-Za-z\s]+?)(?:in|,|\.|$)', text, re.I)
+    if m:
+        data['place_of_accident'] = m.group(1).strip()
+    else:
+        m = re.search(r'near\s+([A-Z][a-zA-Z\s]+?)\s+(?:in|on|,)', text)
+        if m:
+            data['place_of_accident'] = m.group(1).strip()
+
+    # IPC / BNS Sections
+    ipc_matches = re.findall(r'(?:Section|Sec\.?)s?\s+(\d{2,3}[A-Za-z]?)(?:\s*(?:and|,|&)\s*(\d{2,3}[A-Za-z]?))*', text, re.I)
+    sections = []
+    for match_tuple in ipc_matches:
+        for s in match_tuple:
+            if s:
+                sections.append(s)
+    # Also find individual section numbers near "IPC" or "BNS"
+    ipc_nums = re.findall(r'(?:Section|Sec)s?\s+([\d]+[A-Za-z]?(?:\s*(?:and|,|&)\s*[\d]+[A-Za-z]?)*)', text, re.I)
+    for block in ipc_nums:
+        for s in re.findall(r'(\d+[A-Za-z]?)', block):
+            if s not in sections:
+                sections.append(s)
+    if sections:
+        data['ipc_sections'] = ', '.join(sections)
+
+    # Nature of accident
+    if any(w in text_lower for w in ['fatal', 'died', 'killed', 'death', 'dead']):
+        data['nature_of_accident'] = 'Fatal'
+    elif any(w in text_lower for w in ['grievous', 'serious', 'critical']):
+        data['nature_of_accident'] = 'Grievous Injury'
+    elif any(w in text_lower for w in ['injured', 'hurt', 'wound']):
+        data['nature_of_accident'] = 'Injury'
+    else:
+        data['nature_of_accident'] = 'Damage/Loss of property'
+
+    # Number killed
+    word_nums = {'one':'1','two':'2','three':'3','four':'4','five':'5',
+                 'six':'6','seven':'7','eight':'8','nine':'9','ten':'10',
+                 'eleven':'11','twelve':'12','thirteen':'13','fourteen':'14',
+                 'fifteen':'15','sixteen':'16','seventeen':'17','eighteen':'18',
+                 'nineteen':'19','twenty':'20','thirty':'30','forty':'40','fifty':'50'}
+    # Compound numbers: thirty-six, twenty-three, etc.
+    compound_nums = {}
+    tens = {'twenty':'2','thirty':'3','forty':'4','fifty':'5','sixty':'6','seventy':'7','eighty':'8','ninety':'9'}
+    ones = {'one':'1','two':'2','three':'3','four':'4','five':'5','six':'6','seven':'7','eight':'8','nine':'9'}
+    for t_word, t_val in tens.items():
+        for o_word, o_val in ones.items():
+            compound_nums[f'{t_word}-{o_word}'] = f'{t_val}{o_val}'
+            compound_nums[f'{t_word} {o_word}'] = f'{t_val}{o_val}'
+    all_nums = {**word_nums, **compound_nums}
+    m = re.search(r'(\d+|' + '|'.join(sorted(all_nums.keys(), key=len, reverse=True)) + r')\s+(?:persons?\s+)?(?:died|killed|dead|fatalities|death)', text_lower)
+    if m:
+        v = m.group(1)
+        data['num_fatalities'] = all_nums.get(v, v)
+    else:
+        m = re.search(r'(?:total of|about|approximately)?\s*(\d+|' + '|'.join(sorted(all_nums.keys(), key=len, reverse=True)) + r')\s+(?:persons?\s+)?(?:died|killed|dead)', text_lower)
+        if m:
+            v = m.group(1)
+            data['num_fatalities'] = all_nums.get(v, v)
+
+    # Number injured — try compound numbers first
+    compound_pattern = '|'.join(sorted(all_nums.keys(), key=len, reverse=True))
+    m = re.search(r'(?:about|approximately|around)?\s*(' + compound_pattern + r'|\d+)\s*(?:were\s+|persons?\s+)?(?:injured|hurt|wounded|hospitalised|hospitalized)', text_lower)
+    if m:
+        v = m.group(1).strip()
+        data['num_injured'] = all_nums.get(v, v)
+
+    # Number of vehicles
+    m = re.search(r'(\d+|two|three|four|five)\s+vehicles?', text_lower)
+    if m:
+        v = m.group(1)
+        data['num_vehicles'] = word_nums.get(v, v)
+
+    # Vehicle registrations
+    reg_matches = re.findall(r'([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,3}\s*\d{4})', text)
+    if reg_matches:
+        data['v1_reg'] = reg_matches[0] if len(reg_matches) > 0 else ''
+        data['v2_reg'] = reg_matches[1] if len(reg_matches) > 1 else ''
+
+    # Vehicle types  
+    vehicle_types = []
+    vtype_patterns = [
+        r'(?:first|1st)\s+vehicle\s+was\s+(?:a\s+)?([a-zA-Z\s]+?)(?:\s+bearing|,|\.|$)',
+        r'(?:second|2nd)\s+vehicle\s+was\s+(?:a\s+)?([a-zA-Z\s]+?)(?:\s+bearing|,|\.|$)',
+    ]
+    for vp in vtype_patterns:
+        m = re.search(vp, text, re.I)
+        if m:
+            vehicle_types.append(m.group(1).strip())
+    # Fallback: look for known vehicle types
+    known_vehicles = ['passenger bus', 'bus', 'truck', 'car', 'auto rickshaw', 
+                      'motorcycle', 'bike', 'scooter', 'lorry', 'tanker', 'trailer',
+                      'tractor', 'van', 'jeep', 'taxi', 'SUV', 'tempo', 'ambulance']
+    if not vehicle_types:
+        for vt in known_vehicles:
+            if vt.lower() in text_lower:
+                if vt not in vehicle_types:
+                    vehicle_types.append(vt)
+    data['v1_type'] = vehicle_types[0] if len(vehicle_types) > 0 else ''
+    data['v2_type'] = vehicle_types[1] if len(vehicle_types) > 1 else ''
+
+    # Driver names
+    driver_matches = re.findall(r'driven\s+by\s+([A-Z][a-zA-Z\s]+?)(?:\s+from|,|\.|\s+aged|\s+residing)', text)
+    if driver_matches:
+        data['v1_driver'] = driver_matches[0].strip() if len(driver_matches) > 0 else ''
+        data['v2_driver'] = driver_matches[1].strip() if len(driver_matches) > 1 else ''
+
+    # Owner info
+    owner_matches = re.findall(r'owned\s+by\s+([A-Z][a-zA-Z\s]+?)(?:\s+and|,|\.|$)', text)
+    if owner_matches:
+        data['v1_owner'] = owner_matches[0].strip() if len(owner_matches) > 0 else ''
+        data['v2_owner'] = owner_matches[1].strip() if len(owner_matches) > 1 else ''
+
+    # Insurance
+    ins_matches = re.findall(r'insured\s+with\s+([A-Z][a-zA-Z\s]+?)(?:\.|,|$)', text)
+    if ins_matches:
+        data['v1_insurance'] = ins_matches[0].strip() if len(ins_matches) > 0 else ''
+        data['v2_insurance'] = ins_matches[1].strip() if len(ins_matches) > 1 else ''
+
+    # Collision type
+    collision_types = ['head-on collision', 'head on collision', 'rear-end', 'rear end',
+                       'side collision', 'T-bone', 'hit and run', 'hit-and-run',
+                       'vehicle-to-vehicle', 'vehicle to vehicle', 'pile-up', 'pile up',
+                       'overturn', 'overturned', 'rollover', 'skidding']
+    for ct in collision_types:
+        if ct.lower() in text_lower:
+            data['collision_type'] = ct.title()
+            break
+
+    # Nature of collision
+    m = re.search(r'(?:nature of collision|collision was)\s+(?:was\s+)?(?:a\s+)?([a-zA-Z\-\s]+?)(?:\.|,|$)', text, re.I)
+    if m:
+        data['collision_nature'] = m.group(1).strip()
+
+    # Cause of accident
+    causes = []
+    cause_keywords = ['overspeeding', 'rash driving',
+                      'drunk driving', 'drunken driving', 'negligence', 'wrong side',
+                      'dangerous overtaking', 'brake failure', 'tyre burst',
+                      'signal jumping', 'mobile phone', 'overloading', 'poor visibility']
+    for ck in cause_keywords:
+        if ck in text_lower:
+            causes.append(ck.title())
+    if causes:
+        data['cause'] = ', '.join(causes)
+
+    # Weather
+    weather_words = {'clear': 'Clear', 'rain': 'Rain', 'heavy rain': 'Heavy Rain',
+                     'fog': 'Fog', 'mist': 'Mist', 'storm': 'Storm',
+                     'cloudy': 'Cloudy', 'hail': 'Hail'}
+    for wk, wv in weather_words.items():
+        if wk in text_lower:
+            data['weather'] = wv
+            break
+
+    # Lighting
+    light_words = {'daylight': 'Daylight', 'night': 'Night', 'dusk': 'Dusk',
+                   'dawn': 'Dawn', 'dark': 'Dark'}
+    for lk, lv in light_words.items():
+        if lk in text_lower:
+            data['lighting'] = lv
+            break
+
+    # Visibility
+    m = re.search(r'visibility\s+(?:was\s+)?(?:above|over|more than|about)?\s*(\d+\s*(?:meters?|metres?|m))', text, re.I)
+    if m:
+        data['visibility'] = m.group(1).strip()
+
+    # Road type
+    road_types = {'state highway': 'State Highway', 'national highway': 'National Highway',
+                  'expressway': 'Expressway', 'district road': 'District Road',
+                  'village road': 'Village Road', 'city road': 'City Road'}
+    for rk, rv in road_types.items():
+        if rk in text_lower:
+            data['road_type'] = rv
+            break
+
+    # Jurisdiction
+    juris_words = {'panchayat': 'Panchayat', 'municipal': 'Municipal Corporation',
+                   'nagar palika': 'Nagar Palika', 'cantonment': 'Cantonment'}
+    for jk, jv in juris_words.items():
+        if jk in text_lower:
+            data['jurisdiction'] = jv
+            break
+
+    # Area type
+    area_words = {'open area': 'Open Area', 'residential': 'Residential',
+                  'commercial': 'Commercial', 'industrial': 'Industrial'}
+    for ak, av in area_words.items():
+        if ak in text_lower:
+            data['area_type'] = av
+            break
+
+    # Load condition
+    load_words = {'normally loaded': 'Normally Loaded', 'overloaded': 'Overloaded',
+                  'empty': 'Empty', 'not loaded': 'Not Loaded'}
+    for lk, lv in load_words.items():
+        if lk in text_lower:
+            data['load_condition'] = lv
+            break
+
+    # Investigating officer
+    m = re.search(r'(?:investigating officer|IO|I\.O\.)\s+(?:was\s+)?(?:SI|Sub Inspector|Inspector|ASI|SHO)?\s*\.?\s*([A-Z][a-zA-Z\s]+?)(?:,|\.|\s+PIS|\s+attached|$)', text)
+    if m:
+        data['officer_name'] = m.group(1).strip()
+
+    # PIS number
+    m = re.search(r'PIS\s+(?:number|no\.?)?\s*[:\-]?\s*(\d+)', text, re.I)
+    if m:
+        data['officer_pis'] = m.group(1).strip()
+
+    # Informant
+    m = re.search(r'informant\s+was\s+(?:Constable|SI|ASI|SHO|Inspector)?\s*([A-Z][a-zA-Z\s]+?)(?:,|\.|\s+residing)', text)
+    if m:
+        data['informant_name'] = m.group(1).strip()
+
+    # Source of information
+    source_words = {'police': 'Police', 'hospital': 'Hospital', 'witness': 'Witness',
+                    'public': 'Public', 'media': 'Media'}
+    for sk, sv in source_words.items():
+        if f'source of information was {sk}' in text_lower or f'source was {sk}' in text_lower:
+            data['info_source'] = sv
+            break
+
+    # Hospital
+    m = re.search(r'(?:taken to|admitted to|treated at|rushed to)\s+([A-Z][a-zA-Z\s]+?(?:Hospital|Medical|Centre|Center|Clinic))', text)
+    if m:
+        data['hospital'] = m.group(1).strip()
+
+    # Doctor
+    m = re.search(r'(?:Dr\.?|Doctor)\s+([A-Z][a-zA-Z\.\s]+?)(?:\s+attended|,|\.|$)', text)
+    if m:
+        data['doctor'] = 'Dr. ' + m.group(1).strip()
+
+    # CCTV
+    if 'no cctv' in text_lower or 'cctv footage was available' not in text_lower:
+        if 'no cctv' in text_lower or 'not available' in text_lower:
+            data['cctv'] = 'No'
+    if 'cctv footage' in text_lower and 'no' not in text_lower.split('cctv')[0][-20:]:
+        data['cctv'] = 'Yes'
+    if 'no cctv' in text_lower:
+        data['cctv'] = 'No'
+
+    # Vehicles impounded
+    if 'impounded' in text_lower:
+        data['vehicles_impounded'] = 'Yes'
+
+    # Drivers found
+    if 'drivers were found' in text_lower or 'driver was found' in text_lower:
+        data['drivers_found'] = 'Yes'
+    elif 'driver fled' in text_lower or 'absconding' in text_lower:
+        data['drivers_found'] = 'No'
+
+    return data
+
+
+# ═══════════════════════════════════════════════════════════════
+# 8. FORM GENERATOR
 # ═══════════════════════════════════════════════════════════════
 
 class FormGenerator:
-    """Generate editable FAR/DAR form drafts — imported from qa_engine.py."""
+    """Generate editable FAR/DAR form drafts with regex and NER support."""
 
     FAR_TEMPLATE = {
         "form_title": "FORM 1 — FIRST ACCIDENT REPORT (FAR)",
@@ -789,6 +1130,71 @@ class FormGenerator:
                 if f["id"] == "nature_of_accident":
                     f["value"] = sev
         return form
+
+    def prefill_dar(self, entities: dict):
+        """Pre-fill DAR template from extracted entities dict."""
+        import copy
+        form = copy.deepcopy(self.DAR_TEMPLATE)
+        mapping = {
+            "fir_no": "fir_no",
+            "date_of_accident": "date_of_accident",
+            "time_of_accident": "time_of_accident",
+            "place_of_accident": "place_of_accident",
+            "v_reg_no": "v1_reg",
+            "v_type": "v1_type",
+            "driver_name": "v1_driver",
+            "ipc_sections": "ipc_sections",
+            "officer_name": "officer_name",
+            "report_date": "report_date",
+        }
+        for field in form["fields"]:
+            ekey = mapping.get(field["id"])
+            if ekey and ekey in entities and entities[ekey]:
+                field["value"] = str(entities[ekey])
+        # Nature fatal
+        nature = entities.get("nature_of_accident", "")
+        if nature:
+            for f in form["fields"]:
+                if f["id"] == "nature_fatal":
+                    f["value"] = "Yes" if nature == "Fatal" else "No"
+                if f["id"] == "nature_grievous":
+                    f["value"] = "Yes" if nature == "Grievous Injury" else "No"
+        return form
+
+    def prefill_far_from_regex(self, text: str):
+        """Extract fields using regex and prefill FAR template."""
+        data = extract_from_text_regex(text)
+        import copy
+        form = copy.deepcopy(self.FAR_TEMPLATE)
+        mapping = {
+            "fir_no": "fir_no",
+            "date_of_accident": "date_of_accident",
+            "time_of_accident": "time_of_accident",
+            "place_of_accident": "place_of_accident",
+            "nature_of_accident": "nature_of_accident",
+            "num_vehicles": "num_vehicles",
+            "num_fatalities": "num_fatalities",
+            "num_injured": "num_injured",
+            "v1_type": "v1_type",
+            "v2_type": "v2_type",
+            "collision_type": "collision_type",
+            "weather": "weather",
+            "road_type": "road_type",
+            "cause": "cause",
+            "officer_name": "officer_name",
+            "report_date": "report_date",
+        }
+        for field in form["fields"]:
+            ekey = mapping.get(field["id"])
+            if ekey and ekey in data and data[ekey]:
+                field["value"] = str(data[ekey])
+        return form, data
+
+    def prefill_dar_from_regex(self, text: str):
+        """Extract fields using regex and prefill DAR template."""
+        data = extract_from_text_regex(text)
+        form = self.prefill_dar(data)
+        return form, data
 
     def form_to_text(self, form):
         lines = [form["form_title"], form["subtitle"], "=" * 60]
