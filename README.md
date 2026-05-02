@@ -52,3 +52,9 @@ App opens at http://localhost:8501
 - PyTorch
 - Streamlit
 - pdfplumber
+
+<img width="1919" height="869" alt="image" src="https://github.com/user-attachments/assets/17c45067-769c-4ab7-846e-c81d4553197b" />
+<img width="1917" height="875" alt="image" src="https://github.com/user-attachments/assets/a2fef57f-0917-484f-b0ac-d4e23a240e36" />
+<img width="1917" height="865" alt="image" src="https://github.com/user-attachments/assets/ed3d8386-72a9-45ba-8ca0-b55826e6180d" />
+<img width="1043" height="805" alt="image" src="https://github.com/user-attachments/assets/b79f257d-44bf-47e5-8b08-427bc5931390" />
+
