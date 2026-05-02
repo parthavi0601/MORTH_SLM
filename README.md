@@ -6,7 +6,6 @@ An AI-powered incident reporting and legal assistance platform developed for the
 
 ## Architecture
 
-<img width="1440" height="1312" alt="image" src="https://github.com/user-attachments/assets/cfc5c12e-6a1e-418c-9d70-0a5fc90fbaa4" />
 
 ```mermaid
 graph TD
